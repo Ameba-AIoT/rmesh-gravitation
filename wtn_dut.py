@@ -4,23 +4,23 @@ import time
 
 import serial
 from wtn_config import *
+from wtn_node import Node
 import traceback
 import threading
 import os
 
-default_mac = '00:00:00:00:00:00'
 class AmebaDevice:
-    def __init__(self, com, baud=1500000, timeout = 0.5, log_callback=None, children_update=None, data_update=None):
+    def __init__(self, com, baud=1500000, timeout = 0.5, log_callback=None, data_update=None):
         self.com = com
         self.baud = baud
         self.status = True
         self.open_com = serial.Serial(self.com, self.baud, timeout = 1)
         self.last_output = ""
         self.log_callback = log_callback
-        self.children_update = children_update
         self.data_update = data_update
         self.force_to_close = False
         self.serial_lock = threading.Lock()
+        self.node: Node = None
 
     def start_cmd(self, cmd, time_wait=0.2, node=None):
         try:
@@ -60,16 +60,18 @@ class AmebaDevice:
             "aid": r"wtn_aid:(\d+)",
             "debug_text": r"debug:(.*)$"
         }
+        logging.info(f"resolve_out_put of {self.com}")
         # child-3:%x/%x/%x
-        if self.children_update:
+        if self.node:
             match = re.search(r"(child-\d+:[\w/]*)", text)
             if match:
-                self.children_update(match.group(1).strip())
-        if self.data_update:
+                self.node.update_children_info(match.group(1).strip())
             for name, regex in regex_rules.items():
                 match = re.search(regex, text)
                 if match:
-                    self.data_update(name, match.group(1).strip())
+                    setattr(self.node, name, match.group(1).strip())
+                    # self.node.refreshUI(embedded=controller.info_embedded)
+                    # controller.ping_text_layout_auto_adjust(self.node)
 
     def get_output(self):
         result = ""

@@ -72,5 +72,8 @@ tx_power = 20 # 20 dbm
 
 wall_attenuation = 10
 
+default_mac = '00:00:00:00:00:00'
+default_ip = "0.0.0.0"
+
 def get_rssi_by_distance(cur_dis):
     return tx_power - (env_n * 10 * math.log(cur_dis, 10) + band_constant)

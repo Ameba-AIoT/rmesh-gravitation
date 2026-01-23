@@ -342,14 +342,14 @@ class WinGUI(Tk):
 
     def __tk_checkbox_auto_layout(self, parent):
         self.checkbox_auto_layout_value = IntVar(value=1)
-        checkbox = Checkbutton(parent, text="自动布局Auto layout",
+        checkbox = Checkbutton(parent, text="Auto layout",
                                   variable=self.checkbox_auto_layout_value)
         checkbox.place(x=1200, y=self.config_input_y-15, width=150, height=30)
         return checkbox
 
     def __tk_checkbox_show_info_embedded(self, parent):
         self.checkbox_show_info_embedded = IntVar(value=1)
-        checkbox = Checkbutton(parent, text="显示信息Show info",
+        checkbox = Checkbutton(parent, text="Show info",
                                   variable=self.checkbox_show_info_embedded)
         checkbox.place(x=1200, y=self.config_input_y+10, width=150, height=30)
         return checkbox

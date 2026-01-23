@@ -14,7 +14,7 @@ from utils import update_config_key
 from wtn_config import *
 import re
 
-from wtn_dut import AmebaDevice, default_mac
+from wtn_dut import AmebaDevice
 import time
 import threading
 import serial.tools.list_ports
@@ -28,7 +28,6 @@ from wtn_server import WTNServer
 from wtn_ui import Win
 from wtn_wall import Wall
 
-default_ip = "0.0.0.0"
 
 AP_COLOR = "#228B22"
 
@@ -60,6 +59,7 @@ class Controller:
         self.thread_status = None
         self.aps = None
         self.nodes: {int: Node} = {}
+        self.uart_devices: {str: AmebaDevice} = {}
         self.info_embedded = None
         self.table_frame = None
         self.node_info_table_frame = None
@@ -424,54 +424,51 @@ class Controller:
                 logging.debug(f"Scan for serial port changes.")
 
                 ports = serial.tools.list_ports.comports()
-                serial_ports = [port.device for port in ports]
-                logging.debug(f"Current serial ports: {", ".join(serial_ports)}" if serial_ports else "No available serial port.")
+                scanned_ports = [port.device for port in ports]
+                logging.info(f"Scanned serial ports: {", ".join(scanned_ports)}" if scanned_ports else "No available serial port.")
 
-                used_com = []
-                nodes_to_be_delete = {}
-                for node in self.nodes.values():
-                    if node.id in self.aps or node.com == "?":
+                added_coms = self.uart_devices.keys()
+                for com in added_coms:
+                    if self.uart_devices[com] and self.uart_devices[com].node and (self.uart_devices[com].node.ip == default_ip or self.uart_devices[com].node.ip is None):
+                        self.uart_devices[com].node.ip = self.uart_devices[com].get_ip()
+                    if com in scanned_ports:
+                        scanned_ports.remove(com)
+                        if self.uart_devices[com].node is None: # bind node and COM
+                            logging.info(f"{com} does not have a bound node")
+                            com_mac = self.uart_devices[com].get_mac()
+                            logging.info(f"{com} have MAC addr {com_mac}")
+                            existed_node = self.find_node_by_mac(com_mac)
+                            logging.info(f"{com_mac} have existed_node={existed_node}")
+                            if existed_node is not None:
+                                self.uart_devices[com].node = existed_node
+                                existed_node.device = self.uart_devices[com]
+                                existed_node.com = com
+                                logging.info(f"{com} is bound with {existed_node}")
+
+                    else: # unbind inactive COM with its node, but not delete node
+                        self.uart_devices[com].node.device = None
+                        self.uart_devices.pop(com)
+                        logging.info(f"{com_mac} is inactive")
+
+                # handle newly discovered COMs
+                for com in scanned_ports:
+                    new_dev = AmebaDevice(com)
+                    self.uart_devices[com] = new_dev
+                    logging.info(f"find new UART {com}")
+                    new_dev_mac = new_dev.get_mac()
+                    logging.info(f"{com} have MAC addr {new_dev_mac}")
+                    if new_dev_mac == default_mac:
                         continue
-                    if node.com not in serial_ports:
-                        #print(f"remove node {node.com}")
-                        nodes_to_be_delete[node.id] = node
-                        time.sleep(0.01)
-                        continue
-                    # remove node from binding nodes if already added.
-                    if node.com in self.binding_nodes.keys():
-                        # print(f"port already added {node.com}")
-                        self.binding_nodes.pop(node.com)
-                    serial_ports.remove(node.com)
-                if nodes_to_be_delete:
-                    self.node_power_off_set(nodes_to_be_delete)
-                    self.power_off_delete_nodes(nodes_to_be_delete)
-                for node in used_com:
-                    serial_ports.remove(node.com)
-
-                # handle binding nodes
-                binding_nodes_to_delete = []
-                for com, lifespan in self.binding_nodes.items():
-                    if lifespan <= 0:
-                        # print(f"no more wait for bind port {com}")
-                        binding_nodes_to_delete.append(com)
-                        continue
-                    self.binding_nodes[com] = lifespan - 1
-                    if com in serial_ports:
-                        serial_ports.remove(com)
-                        # print(f"wait for {com} to bind")
-
-                # actually delete binding nodes outside the loop
-                for com in binding_nodes_to_delete:
-                    self.binding_nodes.pop(com)
-
-                # add available nodes
-                if serial_ports:
-                    serial_ports = sorted(serial_ports, key=lambda x: int(x[3:]))
-                    print(f"add nodes: {', '.join(serial_ports)}")
-                    for port in serial_ports:
-                        self.binding_nodes[port] = wtn_config.auto_add_timeout
-                    time.sleep(0.5)
-                    self.add_node_by_com(serial_ports)
+                    related_node = self.find_node_by_mac(new_dev_mac)
+                    logging.info(f"{new_dev_mac} have existed_node={related_node}")
+                    if related_node is None:
+                        self.add_remote_node(new_dev_mac, 0, com)
+                        related_node = self.find_node_by_mac(new_dev_mac)
+                        logging.info(f"{com} with MAC addr {new_dev_mac} creates a new node {related_node}")
+                    new_dev.node = related_node
+                    related_node.device = new_dev
+                    related_node.com = com
+                    logging.info(f"{com} is bound with {related_node}")
 
             except Exception as e:
                 print(e)
@@ -525,11 +522,11 @@ class Controller:
             self.table_frame.destroy()
         self.table_frame = tk.Frame(canvas)
         for i, item in enumerate(data):
-            mac_label = tk.Label(self.table_frame, text=item["mac"], borderwidth=1, relief="solid")
+            mac_label = tk.Label(self.table_frame, text=item["mac_last_byte"], borderwidth=1, relief="solid")
             mac_label.grid(row=i, column=0, sticky="nsew")
             score_label = tk.Label(self.table_frame, text=item["score"], borderwidth=1, relief="solid")
             score_label.grid(row=i, column=1, sticky="nsew")
-            help_num_label = tk.Label(self.table_frame, text=item["help_num"], borderwidth=1, relief="solid")
+            help_num_label = tk.Label(self.table_frame, text=item["can_help_num"], borderwidth=1, relief="solid")
             help_num_label.grid(row=i, column=2, sticky="nsew")
         return canvas.create_window(x + x_offset, y + y_offset, window=self.table_frame, anchor="nw")
 
@@ -879,7 +876,7 @@ class Controller:
             location_index += 1
         return -1
 
-    def add_remote_node(self, mac, rnat_flag):
+    def add_remote_node(self, mac, rnat_flag, com=None):
         if self.find_node_by_mac(mac):
             # TODO: -redraw connection
             return
@@ -903,6 +900,8 @@ class Controller:
         print(f"add remote node {node_id} ({mac})at {x},{y}")
         selected_node = node_id
         node = self.nodes[selected_node]
+        if com is not None:
+            node.com = com
         if selected_node not in self.nodes:
             return
         if self.nodes[selected_node].node_text is not None:

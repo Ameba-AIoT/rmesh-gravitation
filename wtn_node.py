@@ -7,6 +7,7 @@ from typing import Optional
 
 import color_config
 import wtn_config
+from wtn_config import *
 from enums import ConnectionType
 from wtn_dut import default_mac
 
@@ -23,11 +24,10 @@ class Node:
         self.dy = 0
         self.change_direction_interval_counter = 0
         self.com = "?"
-        from wtn_dut import default_mac
         self.mac = mac or default_mac
         self.node_text = None
         self.ping_text = None
-        self.device = None
+        self.device: AmebaDevice = None
         self.status = "default"
         self.rssi_table = {}
         self.relation_line = None
@@ -37,7 +37,6 @@ class Node:
         self.father_node = None
         self.father_mac = default_mac
         self.candidate_mac = default_mac
-        from wtn_control import default_ip
         self.ip = default_ip
         self.children = []
         self.ping_monitor: Optional[PingMonitor] = None
@@ -103,7 +102,6 @@ class Node:
         self.status = "root"
 
     def update_children_info(self, text):
-        from wtn_control import default_ip
         self.children_text = text
         # won't update ui when pinging
         if self.ping_monitor and not self.ping_monitor.stop_event.is_set():
@@ -125,7 +123,6 @@ class Node:
                                                                                                     text=result))
 
     def get_ip_and_show(self):
-        from wtn_control import default_ip
         retry_count = 0
 
         # fetch ip address with AT Command
@@ -175,7 +172,7 @@ class Node:
         # Clear history to minimize memory usage
         self.ping_rtt_history = self.ping_rtt_history[-wtn_config.ping_rtt_aver_window_size:]
         # com/mac/ip addr/ping ok/ping loss/ping delay/ping TP
-        ping_result = f"p:{success_count} / {failure_count}-{self.calculate_packet_loss(success_count, failure_count)}% / {delay}"
+        ping_result = f"ping total: {success_count + failure_count}\nloss {failure_count}-{self.calculate_packet_loss(success_count, failure_count)}%\ndelay: {delay}ms"
         from wtn_control import ping_results
         ping_results[self.id] = ping_result
 
