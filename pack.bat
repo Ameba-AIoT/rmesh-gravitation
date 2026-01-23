@@ -1,0 +1,1 @@
+pyinstaller --onefile --clean --windowed --uac-admin --add-data "black-hole.png;." --add-data "config.yaml;." --name Gravitation gravitation.py
