@@ -1,5 +1,7 @@
 # How to run Gravitation
 
+Please first modify `ap_mac_list` in `config.yaml`.
+
 ## Method 1
 
 Directly run `Gravitation.exe`
