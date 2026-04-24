@@ -48,6 +48,11 @@ class Node:
         self.children_text = ""
         self.bssid = None
         self.score = None
+        self.father_rssi = -128
+        self.ap_rssi = -128
+        self.candidate_rssi = -128
+        self.ota_duration = 0
+        self.bcmc_cnt = 0
         self.aid = None
         self.debug_text = None
         self.mesh_enable = enable
@@ -227,9 +232,9 @@ class Node:
 
     def get_basic_info_text(self):
         if wtn_config.Node_Mode is ConnectionType.SOCKET:
-            return (f"{self.mac.split(':')[-1].upper()}:{self.ip}" +
+            return (f"{self.mac.split(':')[-2].upper()}:{self.mac.split(':')[-1].upper()}:{self.ip}" +
                     (
-                        f" ({self.last_report_timestamp.minute}:{self.last_report_timestamp.second})" if self.last_report_timestamp else "") +
+                        f" ({self.last_report_timestamp.hour}:{self.last_report_timestamp.minute}:{self.last_report_timestamp.second})" if self.last_report_timestamp else "") +
                     (f"-{self.reconnect_counter}" if self.reconnect_counter != 0 else "") +
                     f"{("\n" + self.children_text) if self.children_text else ""}")
         else:
