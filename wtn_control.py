@@ -70,6 +70,7 @@ class Controller:
         # node id to node object, node id is from TK GUI framework
         self.nodes: {int: Node} = {}
         self.aps = set()
+        self.discovered_aps: Set[str] = set()  # Track dynamically discovered AP BSSIDs
         self.thread_status = True
         self.ui.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.selected_node:str | None = None
@@ -238,8 +239,12 @@ class Controller:
             logging.warning(f"Node {mac} rnat_flag changed from {original_rnat_flag} to {node.rnat_flag}")
         node.scan_list = packet.scan_list
         node.candidate_mac = packet.candidate_mac
+        # Also update node's bssid from packet
+        node.bssid = packet.bssid
         for record in report.get('payload') or []:
             resolve_out_put(record.get('data'), node.update_children_info, lambda name, value: update_node_data(name, value, node))
+        # Check if BSSID indicates a new AP
+        self.maybe_add_ap_from_bssid(packet.bssid)
         logging.info(f"Node report: {packet}")
 
     def find_node_by_mac(self, mac)->Node:
@@ -668,6 +673,7 @@ class Controller:
 
         node = Node(node_id, x, y, self.ui)
         node.mac = mac
+        node.is_ap = True  # Mark as AP
         self.nodes[node_id] = node
         self.aps.add(node)
         node_text = self.ui.tk_canvas_node_grid.create_text(
@@ -676,6 +682,41 @@ class Controller:
             text=node.get_display_text(), fill="black", font=("Arial", 10))
         node.ui = self.ui
         node.node_text = node_text
+
+    def maybe_add_ap_from_bssid(self, bssid: str):
+        """Check if BSSID is a valid AP and add it if not already known."""
+        default_mac = "00:00:00:00:00:00"
+        if not bssid or bssid == default_mac:
+            return
+
+        # Check if already known (from config or previously discovered)
+        if bssid in wtn_config.ap_mac_list or bssid in self.discovered_aps:
+            return
+
+        # Check if it's already an existing node (could be a mesh device reporting its own MAC)
+        existing_node = self.find_node_by_mac(bssid)
+        if existing_node and existing_node in self.aps:
+            return
+
+        # Discover new AP
+        logging.info(f"Discovered new AP from BSSID: {bssid}")
+        self.discovered_aps.add(bssid)
+
+        # Calculate position: place new APs based on discovery order
+        # First discovered AP goes to center, second to top-right, others with random offset
+        ap_count = len(wtn_config.ap_mac_list) + len(self.discovered_aps)
+        if ap_count == 1:
+            x = self.ui.grid_width // self.ui.cell_width / 2
+            y = self.ui.grid_height // self.ui.cell_height / 2
+        elif ap_count == 2:
+            x = self.ui.cols - wtn_config.ap_x
+            y = wtn_config.ap_y
+        else:
+            offset_range = 10
+            x = wtn_config.ap_x + random.uniform(-offset_range, offset_range)
+            y = wtn_config.ap_y + random.uniform(-offset_range, offset_range)
+
+        self.add_ap(x, y, bssid)
 
     def get_ip(self, evt):
         for node in self.nodes.values():

@@ -62,6 +62,7 @@ class Node:
         self.last_report_timestamp: datetime | None = None
         self.reconnect_counter = 0
         self.scan_list = []
+        self.is_ap = False  # Flag to indicate this node is an AP
         self.build = ""
         self.rnat_flag: bool | None = None
 
@@ -226,7 +227,8 @@ class Node:
         return str_list
 
     def get_display_text(self):
-        if self.mac in wtn_config.ap_mac_list:
+        # Check both config list and is_ap flag for dynamically discovered APs
+        if self.is_ap or self.mac in wtn_config.ap_mac_list:
             return f"AP({self.mac.split(":")[-1]})"
         return self.mac.split(":")[-1].upper()
 
