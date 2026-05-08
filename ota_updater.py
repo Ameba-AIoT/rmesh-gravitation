@@ -72,7 +72,7 @@ class OTAUpgradeTab(tk.Frame):
         self.selected_file_content = None  # 用户选择的OTA文件的内容
         self.ifname = ifname  # 网卡名称
 
-        self.auto_refresh_var = tk.IntVar(value=0)  # Variable for checkbox state
+        self.auto_refresh_var = tk.IntVar(value=1)  # Variable for checkbox state
         self.auto_refresh_job = None  # To store the 'after' job ID
         self.refresh_interval_ms = 1000  # Refresh every 1 seconds
 
@@ -135,6 +135,9 @@ class OTAUpgradeTab(tk.Frame):
         self.auto_refresh_cb = tk.Checkbutton(self.sidebar, text="Auto Refresh",
                                               variable=self.auto_refresh_var, command=self.toggle_auto_refresh)
         self.auto_refresh_cb.pack(pady=10)
+
+        # Start auto-refresh by default
+        self.schedule_next_update()
 
     def select_all_nodes(self):
         """Selects all items in the treeview."""
