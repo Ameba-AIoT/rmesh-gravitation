@@ -71,6 +71,9 @@ class OTAUpgradeTab(tk.Frame):
         self.selected_file = None  # 用户选择的OTA文件名
         self.selected_file_content = None  # 用户选择的OTA文件的内容
         self.ifname = ifname  # 网卡名称
+        self.dual_bin_files = None  # Selected dual bin files
+        self.loop_running = False  # Flag to track if loop OTA is running
+        self.loop_thread = None  # Thread for loop OTA
 
         self.auto_refresh_var = tk.IntVar(value=1)  # Variable for checkbox state
         self.auto_refresh_job = None  # To store the 'after' job ID
@@ -123,6 +126,18 @@ class OTAUpgradeTab(tk.Frame):
 
         self.ota_btn = tk.Button(self.sidebar, text="Perform OTA", command=self.perform_ota)
         self.ota_btn.pack(pady=5, fill=tk.X)
+
+        self.loop_ota_btn = tk.Button(self.sidebar, text="Loop OTA", command=self.loop_ota)
+        self.loop_ota_btn.pack(pady=5, fill=tk.X)
+
+        self.stop_loop_ota_btn = tk.Button(self.sidebar, text="Stop Loop OTA", command=self.stop_loop_ota, state=tk.DISABLED)
+        self.stop_loop_ota_btn.pack(pady=5, fill=tk.X)
+
+        self.select_dual_bin_btn = tk.Button(self.sidebar, text="Select Dual Bin", command=self.select_dual_bin)
+        self.select_dual_bin_btn.pack(pady=5, fill=tk.X)
+
+        self.dual_bin_label = tk.Label(self.sidebar, text="Dual Bin: None", wraplength=180, justify=tk.LEFT)
+        self.dual_bin_label.pack(pady=5, fill=tk.X)
 
         # --- ADDED FOR OTA RETRY FEEDBACK ---
         self.status_label = tk.Label(self.sidebar, text="Status: Idle", wraplength=180, justify=tk.LEFT)
@@ -271,6 +286,185 @@ class OTAUpgradeTab(tk.Frame):
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.sendto(packet, (node_ip, self.udp_port))
             logging.info("Sent OTA packet to %s (%s) for file %s", node_ip, node_mac, filename)
+
+    def loop_ota(self):
+        """Loop OTA - alternate between two bin files until stopped"""
+        if not self.dual_bin_files or len(self.dual_bin_files) != 2:
+            messagebox.showwarning("Warning", "Please select exactly 2 bin files first")
+            return
+
+        if self.loop_running:
+            messagebox.showwarning("In Progress", "Loop OTA is already running")
+            return
+
+        # Check if any nodes are selected
+        selected_items = list(self.tree.selection())
+        if not selected_items:
+            messagebox.showwarning("Warning", "No node selected")
+            return
+
+        # Start loop OTA
+        self.loop_running = True
+        self.loop_ota_btn.config(state=tk.DISABLED)
+        self.stop_loop_ota_btn.config(state=tk.NORMAL)
+        self.select_dual_bin_btn.config(state=tk.DISABLED)
+
+        # Start loop in separate thread
+        self.loop_thread = threading.Thread(target=self._loop_ota_worker, daemon=True)
+        self.loop_thread.start()
+
+    def _loop_ota_worker(self):
+        """Worker thread for loop OTA"""
+        dual_bin_files = self.dual_bin_files[:]
+
+        while self.loop_running:
+            for bin_index, bin_path in enumerate(dual_bin_files):
+                if not self.loop_running:
+                    break
+
+                bin_filename = os.path.basename(bin_path)
+                self.after(0, self.status_label.config, {'text': f"Loop OTA: File {bin_index + 1}/2 - {bin_filename}"})
+
+                # Read file content and set as selected file
+                try:
+                    with open(bin_path, 'rb') as f:
+                        file_content = f.read()
+                except Exception as e:
+                    self.after(0, messagebox.showerror, "Error", f"Failed to read file: {str(e)}")
+                    self._stop_loop_ota()
+                    return
+
+                # Set as selected file (like select_file does)
+                self.selected_file = bin_filename
+                self.selected_file_content = file_content
+                self.after(0, self.file_label.config, {'text': f"OTA File: {bin_filename}"})
+
+                # Get selected nodes
+                selected_items = list(self.tree.selection())
+                if not selected_items:
+                    self.after(0, messagebox.showwarning, "Warning", "No node selected")
+                    self._stop_loop_ota()
+                    return
+
+                # Build node info list for OTA (same as perform_ota)
+                item_to_node = {}
+                if self.controller and hasattr(self.controller, 'nodes'):
+                    nodes = list(self.controller.nodes.values())
+                    mac2node = {n.mac.lower(): n for n in nodes}
+                    for item in selected_items:
+                        node_mac = self.tree.item(item)['values'][5].lower()
+                        item_to_node[item] = mac2node.get(node_mac)
+
+                # Sort by RNAT first
+                selected_items.sort(
+                    key=lambda i: not (item_to_node.get(i) and getattr(item_to_node.get(i), 'rnat_flag', False)))
+                ota_type = 1 if len(selected_items) == len(self.tree.get_children()) else 2
+
+                # Send OTA to nodes that need upgrade
+                target_nodes_info = []
+                for item in selected_items:
+                    _, node_ip, current_ota_version, _, bssid, node_mac = self.tree.item(item)['values']
+
+                    if current_ota_version == bin_filename:
+                        logging.info(f"Skipping node {node_mac} as it already has the target version: {bin_filename}")
+                        continue
+
+                    resolved_ip = self.rnat_cache.get(bssid.lower(), node_ip)
+                    self.send_ota_udp(resolved_ip, node_mac, bin_filename, ota_type)
+                    target_nodes_info.append({'mac': node_mac, 'ip': resolved_ip})
+
+                if not target_nodes_info:
+                    self.after(0, messagebox.showinfo, "Already Updated", "All selected nodes already have the target OTA version.")
+                    continue
+
+                # Wait for all nodes to complete OTA using the same retry logic as perform_ota
+                self._wait_for_ota_loop(target_nodes_info, bin_filename)
+
+                if not self.loop_running:
+                    break
+
+            # Delay between loops
+            if self.loop_running:
+                self.after(0, self.status_label.config, {'text': "Waiting 30s before next file..."})
+                time.sleep(30)
+
+        self._stop_loop_ota()
+
+    def _wait_for_ota_loop(self, target_nodes_info, filename):
+        """Wait for all nodes to complete OTA in loop mode (synchronous)"""
+        nodes_to_wait = list(target_nodes_info)
+
+        # Initial delay before checking
+        time.sleep(self.ota_retry_delay_s)
+
+        for attempt in range(self.ota_retry_max_attempts):
+            if not self.loop_running:
+                return
+
+            if not nodes_to_wait:
+                self.after(0, self.status_label.config, {'text': f"All nodes OTA completed: {filename}"})
+                return
+
+            # Check node status
+            mac_to_node_map = {}
+            if self.controller and hasattr(self.controller, 'nodes'):
+                mac_to_node_map = {
+                    node.mac.lower(): node for node in self.controller.nodes.values()
+                }
+
+            still_pending = []
+            for node_info in nodes_to_wait:
+                node_obj = mac_to_node_map.get(node_info['mac'].lower())
+                ota_version = getattr(node_obj, 'ota_version', '') if node_obj else ''
+
+                # Must wait until OTA version equals filename (without * prefix)
+                is_ota_finished = (ota_version == filename)
+
+                if not is_ota_finished:
+                    still_pending.append(node_info)
+
+            nodes_to_wait = still_pending
+
+            if not nodes_to_wait:
+                self.after(0, self.status_label.config, {'text': f"All nodes OTA completed: {filename}"})
+                return
+
+            # Retry for pending nodes
+            self.after(0, self.status_label.config, {'text': f"Waiting for {len(nodes_to_wait)} node(s) - {filename}"})
+
+            for node_info in nodes_to_wait:
+                self.send_ota_udp(node_info['ip'], node_info['mac'], filename, 2)
+
+            if attempt < self.ota_retry_max_attempts - 1:
+                time.sleep(self.ota_retry_interval_s)
+
+        # Timeout
+        self.after(0, self.status_label.config, {'text': f"Timeout: {len(nodes_to_wait)} node(s) failed"})
+
+    def stop_loop_ota(self):
+        """Stop loop OTA"""
+        self.loop_running = False
+        self._stop_loop_ota()
+
+    def _stop_loop_ota(self):
+        """Internal method to stop loop OTA and reset UI"""
+        self.loop_running = False
+        self.after(0, self.loop_ota_btn.config, {'state': tk.NORMAL})
+        self.after(0, self.stop_loop_ota_btn.config, {'state': tk.DISABLED})
+        self.after(0, self.select_dual_bin_btn.config, {'state': tk.NORMAL})
+        self.after(0, self.status_label.config, {'text': "Status: Idle"})
+
+    def select_dual_bin(self):
+        """Select two bin files for dual bin OTA"""
+        file_paths = filedialog.askopenfilename(multiple=True)
+        if file_paths:
+            file_list = list(file_paths)
+            if len(file_list) != 2:
+                messagebox.showwarning("Warning", "Please select exactly 2 bin files")
+                return
+            self.dual_bin_files = file_list
+            display_text = "Dual Bin:\n" + "\n".join([os.path.basename(f) for f in file_list])
+            self.dual_bin_label.config(text=display_text)
 
     def perform_ota(self):
         """执行OTA升级，优先发RNAT节点，并带重试机制"""
