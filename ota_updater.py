@@ -362,8 +362,12 @@ class OTAUpgradeTab(tk.Frame):
 
                 # Send OTA to nodes that need upgrade
                 target_nodes_info = []
+                from_version = None
                 for item in selected_items:
                     _, node_ip, current_ota_version, _, bssid, node_mac = self.tree.item(item)['values']
+
+                    if from_version is None and current_ota_version:
+                        from_version = current_ota_version
 
                     if current_ota_version == bin_filename:
                         logging.info(f"Skipping node {node_mac} as it already has the target version: {bin_filename}")
@@ -377,8 +381,34 @@ class OTAUpgradeTab(tk.Frame):
                     self.after(0, messagebox.showinfo, "Already Updated", "All selected nodes already have the target OTA version.")
                     continue
 
+                # Record start time and OTA cmd round counter
+                start_time = time.time()
+                start_str = time.strftime("%Y-%m-%d %H:%M:%S")
+                ota_cmd_rounds = [0]  # Track number of OTA cmd rounds sent
+
                 # Wait for all nodes to complete OTA using the same retry logic as perform_ota
-                self._wait_for_ota_loop(target_nodes_info, bin_filename)
+                self._wait_for_ota_loop(target_nodes_info, bin_filename, ota_cmd_rounds)
+
+                # Record end time and log to file
+                end_time = time.time()
+                end_str = time.strftime("%Y-%m-%d %H:%M:%S")
+                duration = end_time - start_time
+                duration_str = f"{duration:.1f}s"
+
+                # Get from_version if still None (check from first target node)
+                if from_version is None and target_nodes_info and self.controller and hasattr(self.controller, 'nodes'):
+                    mac_to_node = {n.mac.lower(): n for n in self.controller.nodes.values()}
+                    first_node = mac_to_node.get(target_nodes_info[0]['mac'].lower())
+                    if first_node:
+                        from_version = getattr(first_node, 'ota_version', 'Unknown')
+
+                # Write to log file
+                log_line = f"{start_str} - {end_str}, OTA File: {from_version or 'Unknown'} -> {bin_filename}, OTA Cmd Rounds: {ota_cmd_rounds[0]}, Duration: {duration_str}\n"
+                try:
+                    with open("loop_ota_log.txt", "a") as f:
+                        f.write(log_line)
+                except Exception as e:
+                    logging.error(f"Failed to write OTA log: {e}")
 
                 if not self.loop_running:
                     break
@@ -390,7 +420,7 @@ class OTAUpgradeTab(tk.Frame):
 
         self._stop_loop_ota()
 
-    def _wait_for_ota_loop(self, target_nodes_info, filename):
+    def _wait_for_ota_loop(self, target_nodes_info, filename, ota_cmd_rounds):
         """Wait for all nodes to complete OTA in loop mode (synchronous, infinite retry)"""
         nodes_to_wait = list(target_nodes_info)
 
@@ -437,6 +467,7 @@ class OTAUpgradeTab(tk.Frame):
 
             # Send OTA cmd only to nodes that haven't started (no * and not equals filename)
             if nodes_to_send_cmd:
+                ota_cmd_rounds[0] += 1
                 self.after(0, self.status_label.config, {'text': f"Sending OTA to {len(nodes_to_send_cmd)} node(s) - {filename}"})
                 for node_info in nodes_to_send_cmd:
                     self.send_ota_udp(node_info['ip'], node_info['mac'], filename, 2)
