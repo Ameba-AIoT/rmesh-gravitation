@@ -391,18 +391,14 @@ class OTAUpgradeTab(tk.Frame):
         self._stop_loop_ota()
 
     def _wait_for_ota_loop(self, target_nodes_info, filename):
-        """Wait for all nodes to complete OTA in loop mode (synchronous)"""
+        """Wait for all nodes to complete OTA in loop mode (synchronous, infinite retry)"""
         nodes_to_wait = list(target_nodes_info)
 
         # Initial delay before checking
         time.sleep(self.ota_retry_delay_s)
 
-        for attempt in range(self.ota_retry_max_attempts):
+        while True:
             if not self.loop_running:
-                return
-
-            if not nodes_to_wait:
-                self.after(0, self.status_label.config, {'text': f"All nodes OTA completed: {filename}"})
                 return
 
             # Check node status
@@ -413,33 +409,40 @@ class OTAUpgradeTab(tk.Frame):
                 }
 
             still_pending = []
+            nodes_to_send_cmd = []
             for node_info in nodes_to_wait:
                 node_obj = mac_to_node_map.get(node_info['mac'].lower())
                 ota_version = getattr(node_obj, 'ota_version', '') if node_obj else ''
 
-                # Must wait until OTA version equals filename (without * prefix)
                 is_ota_finished = (ota_version == filename)
+                is_ota_in_progress = ota_version.startswith('*')
 
-                if not is_ota_finished:
+                if is_ota_finished:
+                    # Already completed, remove from waiting list
+                    continue
+                elif is_ota_in_progress:
+                    # In progress (has *), keep waiting but don't send cmd
                     still_pending.append(node_info)
+                else:
+                    # Not started yet, need to send cmd
+                    still_pending.append(node_info)
+                    nodes_to_send_cmd.append(node_info)
 
             nodes_to_wait = still_pending
 
+            # Check if all nodes are done (no * and equals filename) - can switch to next file
             if not nodes_to_wait:
                 self.after(0, self.status_label.config, {'text': f"All nodes OTA completed: {filename}"})
                 return
 
-            # Retry for pending nodes
-            self.after(0, self.status_label.config, {'text': f"Waiting for {len(nodes_to_wait)} node(s) - {filename}"})
+            # Send OTA cmd only to nodes that haven't started (no * and not equals filename)
+            if nodes_to_send_cmd:
+                self.after(0, self.status_label.config, {'text': f"Sending OTA to {len(nodes_to_send_cmd)} node(s) - {filename}"})
+                for node_info in nodes_to_send_cmd:
+                    self.send_ota_udp(node_info['ip'], node_info['mac'], filename, 2)
 
-            for node_info in nodes_to_wait:
-                self.send_ota_udp(node_info['ip'], node_info['mac'], filename, 2)
-
-            if attempt < self.ota_retry_max_attempts - 1:
-                time.sleep(self.ota_retry_interval_s)
-
-        # Timeout
-        self.after(0, self.status_label.config, {'text': f"Timeout: {len(nodes_to_wait)} node(s) failed"})
+            # Wait before next check
+            time.sleep(self.ota_retry_interval_s)
 
     def stop_loop_ota(self):
         """Stop loop OTA"""
