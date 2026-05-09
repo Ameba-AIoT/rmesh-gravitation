@@ -413,10 +413,10 @@ class OTAUpgradeTab(tk.Frame):
                 if not self.loop_running:
                     break
 
-            # Delay between loops
-            if self.loop_running:
-                self.after(0, self.status_label.config, {'text': "Waiting 30s before next file..."})
-                time.sleep(30)
+                # Delay between files (30s after each OTA completion)
+                if self.loop_running:
+                    self.after(0, self.status_label.config, {'text': "Waiting 30s before next file..."})
+                    time.sleep(30)
 
         self._stop_loop_ota()
 
