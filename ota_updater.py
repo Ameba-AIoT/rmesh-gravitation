@@ -316,6 +316,17 @@ class OTAUpgradeTab(tk.Frame):
     def _loop_ota_worker(self):
         """Worker thread for loop OTA"""
         dual_bin_files = self.dual_bin_files[:]
+        total_files = len(dual_bin_files)
+        selected_items = list(self.tree.selection())
+
+        # Extract target MACs once at the beginning
+        target_macs = []
+        for item in selected_items:
+            _, _, _, _, _, node_mac = self.tree.item(item)['values']
+            target_macs.append(node_mac.lower())
+
+        node_count = len(target_macs)
+        self.after(0, self.status_label.config, {'text': f"[Loop OTA] Starting with {node_count} nodes, {total_files} files..."})
 
         while self.loop_running:
             for bin_index, bin_path in enumerate(dual_bin_files):
@@ -323,7 +334,9 @@ class OTAUpgradeTab(tk.Frame):
                     break
 
                 bin_filename = os.path.basename(bin_path)
-                self.after(0, self.status_label.config, {'text': f"Loop OTA: File {bin_index + 1}/2 - {bin_filename}"})
+
+                # Status: Starting file OTA
+                self.after(0, self.status_label.config, {'text': f"[Loop OTA] Starting: {bin_filename} ({bin_index + 1}/{len(dual_bin_files)})"})
 
                 # Read file content and set as selected file
                 try:
@@ -339,55 +352,18 @@ class OTAUpgradeTab(tk.Frame):
                 self.selected_file_content = file_content
                 self.after(0, self.file_label.config, {'text': f"OTA File: {bin_filename}"})
 
-                # Get selected nodes
-                selected_items = list(self.tree.selection())
-                if not selected_items:
-                    self.after(0, messagebox.showwarning, "Warning", "No node selected")
-                    self._stop_loop_ota()
-                    return
-
-                # Build node info list for OTA (same as perform_ota)
-                item_to_node = {}
-                if self.controller and hasattr(self.controller, 'nodes'):
-                    nodes = list(self.controller.nodes.values())
-                    mac2node = {n.mac.lower(): n for n in nodes}
-                    for item in selected_items:
-                        node_mac = self.tree.item(item)['values'][5].lower()
-                        item_to_node[item] = mac2node.get(node_mac)
-
-                # Sort by RNAT first
-                selected_items.sort(
-                    key=lambda i: not (item_to_node.get(i) and getattr(item_to_node.get(i), 'rnat_flag', False)))
-                ota_type = 1 if len(selected_items) == len(self.tree.get_children()) else 2
-
-                # Send OTA to nodes that need upgrade
-                target_nodes_info = []
-                from_version = None
-                for item in selected_items:
-                    _, node_ip, current_ota_version, _, bssid, node_mac = self.tree.item(item)['values']
-
-                    if from_version is None and current_ota_version:
-                        from_version = current_ota_version
-
-                    if current_ota_version == bin_filename:
-                        logging.info(f"Skipping node {node_mac} as it already has the target version: {bin_filename}")
-                        continue
-
-                    resolved_ip = self.rnat_cache.get(bssid.lower(), node_ip)
-                    self.send_ota_udp(resolved_ip, node_mac, bin_filename, ota_type)
-                    target_nodes_info.append({'mac': node_mac, 'ip': resolved_ip})
-
-                if not target_nodes_info:
-                    self.after(0, messagebox.showinfo, "Already Updated", "All selected nodes already have the target OTA version.")
-                    continue
-
                 # Record start time and OTA cmd round counter
                 start_time = time.time()
                 start_str = time.strftime("%Y-%m-%d %H:%M:%S")
                 ota_cmd_rounds = [0]  # Track number of OTA cmd rounds sent
 
-                # Wait for all nodes to complete OTA using the same retry logic as perform_ota
-                self._wait_for_ota_loop(target_nodes_info, bin_filename, ota_cmd_rounds)
+                # Phase 1: Ensure all nodes started
+                self.after(0, self.status_label.config, {'text': f"[Loop OTA] Phase 1: Starting OTA: {bin_filename}"})
+                self._ensure_all_nodes_started(target_macs, bin_filename, ota_cmd_rounds)
+
+                # Phase 2: Wait for all nodes completed
+                self.after(0, self.status_label.config, {'text': f"[Loop OTA] Phase 2: Waiting for completion: {bin_filename}"})
+                self._wait_all_nodes_completed(target_macs, bin_filename)
 
                 # Record end time and log to file
                 end_time = time.time()
@@ -395,85 +371,111 @@ class OTAUpgradeTab(tk.Frame):
                 duration = end_time - start_time
                 duration_str = f"{duration:.1f}s"
 
-                # Get from_version if still None (check from first target node)
-                if from_version is None and target_nodes_info and self.controller and hasattr(self.controller, 'nodes'):
-                    mac_to_node = {n.mac.lower(): n for n in self.controller.nodes.values()}
-                    first_node = mac_to_node.get(target_nodes_info[0]['mac'].lower())
-                    if first_node:
-                        from_version = getattr(first_node, 'ota_version', 'Unknown')
-
                 # Write to log file
-                log_line = f"{start_str} - {end_str}, OTA File: {from_version or 'Unknown'} -> {bin_filename}, OTA Cmd Rounds: {ota_cmd_rounds[0]}, Duration: {duration_str}\n"
+                log_line = f"{start_str} - {end_str}, OTA File: -> {bin_filename}, OTA Cmd Rounds: {ota_cmd_rounds[0]}, Duration: {duration_str}\n"
                 try:
                     with open("loop_ota_log.txt", "a") as f:
                         f.write(log_line)
                 except Exception as e:
                     logging.error(f"Failed to write OTA log: {e}")
 
+                self.after(0, self.status_label.config, {'text': f"[Loop OTA] Completed: {bin_filename}, Duration: {duration_str}, Rounds: {ota_cmd_rounds[0]}"})
+
                 if not self.loop_running:
                     break
 
-                # Delay between files (30s after each OTA completion)
+                # Delay between files (20s after each OTA completion)
                 if self.loop_running:
-                    self.after(0, self.status_label.config, {'text': "Waiting 30s before next file..."})
-                    time.sleep(30)
+                    for remaining in range(20, 0, -1):
+                        if not self.loop_running:
+                            break
+                        self.after(0, self.status_label.config, {'text': f"[Loop OTA] Next file in {remaining}s..."})
+                        time.sleep(1)
 
         self._stop_loop_ota()
 
-    def _wait_for_ota_loop(self, target_nodes_info, filename, ota_cmd_rounds):
-        """Wait for all nodes to complete OTA in loop mode (synchronous, infinite retry)"""
-        nodes_to_wait = list(target_nodes_info)
+    def _ensure_all_nodes_started(self, target_macs, filename, ota_cmd_rounds):
+        """Phase 1: Send OTA cmd until all nodes started"""
+        if not self.controller or not hasattr(self.controller, 'nodes'):
+            return
 
-        # Initial delay before checking
-        time.sleep(self.ota_retry_delay_s)
+        while self.loop_running:
+            logging.info(f"[Phase 1] Loop iteration started, loop_running={self.loop_running}")
+            macs_to_send = []
+            nodes = list(self.controller.nodes.values())
+            mac2node = {n.mac.lower(): n for n in nodes}
 
-        while True:
-            if not self.loop_running:
-                return
-
-            # Check node status
-            mac_to_node_map = {}
-            if self.controller and hasattr(self.controller, 'nodes'):
-                mac_to_node_map = {
-                    node.mac.lower(): node for node in self.controller.nodes.values()
-                }
-
-            still_pending = []
-            nodes_to_send_cmd = []
-            for node_info in nodes_to_wait:
-                node_obj = mac_to_node_map.get(node_info['mac'].lower())
-                ota_version = getattr(node_obj, 'ota_version', '') if node_obj else ''
-
-                is_ota_finished = (ota_version == filename)
-                is_ota_in_progress = ota_version.startswith('*')
-
-                if is_ota_finished:
-                    # Already completed, remove from waiting list
+            logging.info(f"[Phase 1] Checking {len(target_macs)} target MACs...")
+            for target_mac in target_macs:
+                node_obj = mac2node.get(target_mac)
+                if not node_obj:
+                    logging.info(f"[Phase 1] MAC {target_mac}: node_obj not found in controller")
                     continue
-                elif is_ota_in_progress:
-                    # In progress (has *), keep waiting but don't send cmd
-                    still_pending.append(node_info)
-                else:
-                    # Not started yet, need to send cmd
-                    still_pending.append(node_info)
-                    nodes_to_send_cmd.append(node_info)
+                ota_version = getattr(node_obj, 'ota_version', '')
+                logging.info(f"[Phase 1] MAC {target_mac}: ota_version={ota_version}, filename={filename}")
+                if ota_version != filename and ota_version != "*" + filename:
+                    # Get IP: RNAT node uses own IP, Non-RNAT uses BSSID's RNAT IP from rnat_cache
+                    ip = getattr(node_obj, 'ip', None)
+                    rnat_flag = getattr(node_obj, 'rnat_flag', False)
+                    bssid = getattr(node_obj, 'bssid', '')
+                    if rnat_flag:
+                        target_ip = ip
+                    else:
+                        target_ip = self.rnat_cache.get(bssid.lower(), ip)
+                    if target_ip:
+                        macs_to_send.append((target_ip, target_mac))
+                        logging.info(f"[Phase 1] Added {target_mac} to macs_to_send")
 
-            nodes_to_wait = still_pending
+            # Determine OTA type: 1 for all nodes, 2 for partial
+            ota_type = 1 if len(target_macs) == len(self.tree.get_children()) else 2
 
-            # Check if all nodes are done (no * and equals filename) - can switch to next file
-            if not nodes_to_wait:
-                self.after(0, self.status_label.config, {'text': f"All nodes OTA completed: {filename}"})
+            if not macs_to_send:
+                self.after(0, self.status_label.config, {'text': f"[Phase 1] All nodes started: {filename}"})
                 return
 
-            # Send OTA cmd only to nodes that haven't started (no * and not equals filename)
-            if nodes_to_send_cmd:
-                ota_cmd_rounds[0] += 1
-                self.after(0, self.status_label.config, {'text': f"Sending OTA to {len(nodes_to_send_cmd)} node(s) - {filename}"})
-                for node_info in nodes_to_send_cmd:
-                    self.send_ota_udp(node_info['ip'], node_info['mac'], filename, 2)
+            ota_cmd_rounds[0] += 1
+            self.after(0, self.status_label.config, {'text': f"[Phase 1] Starting {len(macs_to_send)} nodes: {filename}"})
+            logging.info(f"[Phase 1] Round {ota_cmd_rounds[0]}: {[m[1] for m in macs_to_send]}")
 
-            # Wait before next check
+            for ip, mac in macs_to_send:
+                logging.info(f"[Phase 1] Sending OTA to {mac} at {ip}")
+                self.send_ota_udp(ip, mac, filename, ota_type)
+
             time.sleep(self.ota_retry_interval_s)
+
+    def _wait_all_nodes_completed(self, target_macs, filename):
+        """Phase 2: Wait for all nodes to complete"""
+        if not self.controller or not hasattr(self.controller, 'nodes'):
+            return
+
+        while self.loop_running:
+            macs_not_finished = []
+            nodes = list(self.controller.nodes.values())
+            mac2node = {n.mac.lower(): n for n in nodes}
+
+            for target_mac in target_macs:
+                node_obj = mac2node.get(target_mac)
+                if not node_obj:
+                    continue
+                ota_version = getattr(node_obj, 'ota_version', '')
+                if ota_version != filename:
+                    macs_not_finished.append(target_mac)
+
+            if not macs_not_finished:
+                self.after(0, self.status_label.config, {'text': f"[Phase 2] All completed: {filename}"})
+                return
+
+            self.after(0, self.status_label.config, {'text': f"[Phase 2] Waiting {len(macs_not_finished)}: {filename}"})
+            logging.info(f"[Phase 2] Waiting: {macs_not_finished}")
+            time.sleep(self.ota_retry_interval_s)
+
+    def _find_ip_by_mac(self, mac):
+        """Find IP from tree view by MAC address"""
+        for item in self.tree.get_children():
+            _, ip, _, _, _, node_mac = self.tree.item(item)['values']
+            if node_mac.lower() == mac.lower():
+                return ip
+        return None
 
     def stop_loop_ota(self):
         """Stop loop OTA"""
